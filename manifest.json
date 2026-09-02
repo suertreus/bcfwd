@@ -1,0 +1,5 @@
+[{
+    "Config": "config.json",
+    "RepoTags": ["bcfwd:latest"],
+    "Layers": ["rootfs.tar"]
+}]

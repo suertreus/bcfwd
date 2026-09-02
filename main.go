@@ -74,7 +74,6 @@ func main() {
   }
   var buf [65536]byte
   var errs int
-var pkt int
 Recvmsg:
   for {
     n, _, rf, src, err := unix.Recvmsg(sock, buf[:], nil, 0)
@@ -216,7 +215,6 @@ Recvmsg:
         break
       }
     }
-if pkt++; pkt > 10 { break }
   }
 }
 
