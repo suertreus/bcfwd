@@ -13,7 +13,7 @@ import (
   "net"
 )
 
-const debug = false
+const debug = true
 
 type netw struct {
   nn, bc uint32
@@ -46,31 +46,51 @@ func checksum16(buf []byte) uint16 {
   for i := 0; i + 1 < len(buf); i += 2 {
     sum += uint32(binary.BigEndian.Uint16(buf[i:i + 2]))
   }
-  return uint16(sum >> 16) + uint16(sum)
+  for sum > 0xffff {
+    sum = uint32(uint16(sum) + uint16(sum >> 16));
+  }
+  return uint16(sum)
 }
 
 func main() {
   netws, err := localNets()
   if err != nil {
-    log.Fatalf("Error getting local networks: %v", err);
+    if debug {
+      log.Fatalf("Error getting local networks: %v", err)
+    }
+    os.Exit(1)
   }
-  for _, netw := range netws {
-    log.Printf("Local network %d.%d.%d.%d, broadcast %d.%d.%d.%d",
-               netw.nn >> 24 & 0xff, netw.nn >> 16 & 0xff, netw.nn >> 8 & 0xff, netw.nn >> 0 & 0xff,
-               netw.bc >> 24 & 0xff, netw.bc >> 16 & 0xff, netw.bc >> 8 & 0xff, netw.bc >> 0 & 0xff,)
+  if debug {
+    for _, netw := range netws {
+      log.Printf("Local network %d.%d.%d.%d, broadcast %d.%d.%d.%d",
+                 netw.nn >> 24 & 0xff, netw.nn >> 16 & 0xff, netw.nn >> 8 & 0xff, netw.nn >> 0 & 0xff,
+                 netw.bc >> 24 & 0xff, netw.bc >> 16 & 0xff, netw.bc >> 8 & 0xff, netw.bc >> 0 & 0xff)
+    }
   }
   sock, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_UDP)
   if err != nil {
-    log.Fatalf("Error opening socket: %v", err);
+    if debug {
+      log.Fatalf("Error opening socket: %v", err)
+    }
+    os.Exit(2)
   }
   if err = unix.SetsockoptInt(sock, unix.SOL_SOCKET, unix.SO_BROADCAST, 1); err != nil {
-    log.Fatalf("Error setting socket option SO_BROADCAST: %v", err)
+    if debug {
+      log.Fatalf("Error setting socket option SO_BROADCAST: %v", err)
+    }
+    os.Exit(3)
   }
   if err = unix.SetsockoptInt(sock, unix.IPPROTO_IP, unix.IP_HDRINCL, 1); err != nil {
-    log.Fatalf("Error setting socket option IP_HDRINCL: %v", err)
+    if debug {
+      log.Fatalf("Error setting socket option IP_HDRINCL: %v", err)
+    }
+    os.Exit(4)
   }
   if err := unix.Bind(sock, &unix.SockaddrInet4{}); err != nil {
-    log.Fatalf("Error binding socket: %v", err);
+    if debug {
+      log.Fatalf("Error binding socket: %v", err)
+    }
+    os.Exit(5)
   }
   var buf [65536]byte
   var errs int
@@ -86,10 +106,14 @@ Recvmsg:
       }
       errs++
       if errs >= 10 {
-        log.Fatal("Too many consecutive errors")
+        if debug {
+          log.Fatal("Too many consecutive errors")
+        }
+        os.Exit(6)
       }
       continue
     }
+    errs = 0
     var src4 *unix.SockaddrInet4
     if debug {
       var ok bool
@@ -129,11 +153,11 @@ Recvmsg:
       if totlen := binary.BigEndian.Uint16(buf[2:4]); int(totlen) != len(buf) {
         log.Printf("Received %d bytes but packet ip length field is %d bytes from %d.%d.%d.%d", len(buf), totlen, src4.Addr[0], src4.Addr[1], src4.Addr[2], src4.Addr[3])
         continue
-      } else if ihl := buf[0] & 0xf; totlen < uint16(ihl) * 4 {
-        log.Printf("Header is %d words but total length is only %d bytes from %d.%d.%d.%d", ihl, totlen, src4.Addr[0], src4.Addr[1], src4.Addr[2], src4.Addr[3])
+      } else if ihl := buf[0] & 0xf; n < int(ihl) * 4 {
+        log.Printf("Header is %d words but total length is only %d bytes from %d.%d.%d.%d", ihl, n, src4.Addr[0], src4.Addr[1], src4.Addr[2], src4.Addr[3])
         continue
       } else if cksum := checksum16(buf[0:ihl*4]); cksum != 0xffff {
-        log.Printf("Bad IPv4 checksum %04x from %d.%d.%d.%d", cksum, src4.Addr[0], src4.Addr[1], src4.Addr[2], src4.Addr[3])
+        log.Printf("Bad IPv4 checksum 0x%04x from %d.%d.%d.%d", cksum, src4.Addr[0], src4.Addr[1], src4.Addr[2], src4.Addr[3])
         continue
       }
     }
@@ -181,14 +205,16 @@ Recvmsg:
       cksum := uint32(^binary.BigEndian.Uint16(buf[10:12]))
       cksum += ^paddr >> 16 + ^paddr & 0xffff
       cksum += netw.bc >> 16 + netw.bc & 0xffff
-      cksum += cksum >> 16
+      for cksum > 0xffff {
+        cksum = uint32(uint16(cksum) + uint16(cksum >> 16));
+      }
       cksum = ^cksum
       binary.BigEndian.PutUint16(buf[10:12], uint16(cksum))
       binary.BigEndian.PutUint32(buf[16:20], netw.bc)
       paddr = netw.bc
       if debug {
         if cksum := checksum16(buf[0:ihl*4]); cksum != 0xffff {
-          log.Printf("Bad recomputed IPv4 checksum %04x from %d.%d.%d.%d", cksum, src4.Addr[0], src4.Addr[1], src4.Addr[2], src4.Addr[3])
+          log.Printf("Bad recomputed IPv4 checksum 0x%04x from %d.%d.%d.%d", cksum, src4.Addr[0], src4.Addr[1], src4.Addr[2], src4.Addr[3])
           continue
         }
       }
