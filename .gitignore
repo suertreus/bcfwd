@@ -1,2 +1,4 @@
 bcfwd
-*.tar
+bcfwd-debug
+rootfs.tar
+bcfwd.tar
