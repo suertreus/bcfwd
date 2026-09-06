@@ -11,6 +11,7 @@ import (
   "golang.org/x/sys/unix"
   "log"
   "net"
+  "os"
 )
 
 const debug = true
@@ -67,7 +68,7 @@ func main() {
                  netw.bc >> 24 & 0xff, netw.bc >> 16 & 0xff, netw.bc >> 8 & 0xff, netw.bc >> 0 & 0xff)
     }
   }
-  sock, err := unix.Socket(unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_UDP)
+  sock, err := unix.Socket(unix.PF_INET, unix.SOCK_RAW, unix.IPPROTO_UDP)
   if err != nil {
     if debug {
       log.Fatalf("Error opening socket: %v", err)
