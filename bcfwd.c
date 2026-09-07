@@ -17,11 +17,11 @@
 #ifndef NDEBUG
 #include <inttypes.h>
 #include <stdio.h>
-#endif
 
 #define IPADDR "%" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8
 #define IPWORD(addr) (uint8_t)((addr) >> 24), (uint8_t)((addr) >> 16), (uint8_t)((addr) >> 8), (uint8_t)((addr) >> 0)
 #define IPBYTES(addr) (addr)[0], (addr)[1], (addr)[2], (addr)[3]
+#endif
 
 static inline uint16_t load16(const uint8_t b[static const 2]) {
   return b[0] << 8 | b[1] << 0;
@@ -96,7 +96,7 @@ static const struct net *local_nets(void) {
     break;
   }
   while (1) {
-    uint8_t buf[4096];
+    alignas(struct nlmsghdr) uint8_t buf[4096];
     size_t rx_bytes;
     int done = 0;
     while (1) {
@@ -171,9 +171,23 @@ static const struct net *local_nets(void) {
       for (const struct rtattr *attr = (const struct rtattr *)IFA_RTA(addrmsg); RTA_OK(attr, payload_bytes); attr = RTA_NEXT(attr, payload_bytes)) {
         switch (attr->rta_type) {
           case IFA_BROADCAST: {
+            if (num_nets >= sizeof(nets) / sizeof(*nets)) {
+#ifndef NDEBUG
+              fprintf(stderr, "Too many local interfaces; %zu >= %zu\n", num_nets, sizeof(nets) / sizeof(*nets));
+#endif
+              local_nets_err = 8;
+              return NULL;
+            }
             const struct in_addr *addr = (const struct in_addr *)RTA_DATA(attr);
-            nets[num_nets].nn = load32((const uint8_t *)&addr->s_addr) & 0xffffffff00000000 >> addrmsg->ifa_prefixlen;
-            nets[num_nets++].bc = load32((const uint8_t *)&addr->s_addr);
+            nets[num_nets].bc = load32((const uint8_t *)&addr->s_addr);
+            if (!addrmsg->ifa_prefixlen) {
+#ifndef NDEBUG
+              fprintf(stderr, "Broadcast address " IPADDR " with prefix len of 0... wtf?\n", IPWORD(nets[num_nets].bc));
+#endif
+              continue;
+            }
+            nets[num_nets].nn = nets[num_nets].bc & 0xffffffff << (32 - addrmsg->ifa_prefixlen);
+            num_nets++;
             break;
           }
         }
@@ -182,7 +196,7 @@ static const struct net *local_nets(void) {
 #ifndef NDEBUG
         fprintf(stderr, "%zu trailing payload bytes after !RTA_OK\n", payload_bytes);
 #endif
-        local_nets_err = 8;
+        local_nets_err = 9;
         return NULL;
       }
       if (!(msg->nlmsg_flags & NLM_F_MULTI)) {
@@ -196,7 +210,7 @@ static const struct net *local_nets(void) {
 #ifndef NDEBUG
       fprintf(stderr, "%zu trailing bytes after !NLMSG_OK\n", rx_bytes);
 #endif
-      local_nets_err = 9;
+      local_nets_err = 10;
       return NULL;
     }
     if (done) break;
@@ -234,8 +248,8 @@ int main(void) {
     return 0x10 + local_nets_err;
   }
 #ifndef NDEBUG
-  for (const struct net *net = nets; net->nn; ++net) {
-    printf("Local network " IPADDR ", broadcast " IPADDR "\n", IPWORD(net->nn), IPWORD(net->bc));
+  for (size_t net_num = 0; net_num < num_nets; net_num++) {
+    printf("Local network " IPADDR ", broadcast " IPADDR "\n", IPWORD(nets[net_num].nn), IPWORD(nets[net_num].bc));
   }
 #endif
   const int sock = socket(PF_INET, SOCK_RAW, IPPROTO_UDP);
@@ -329,10 +343,10 @@ int main(void) {
     const uint32_t saddr = load32(&buf[12]);
     const uint32_t daddr = load32(&buf[16]);
     int db = 0, cnt = 0;
-    for (const struct net *net = nets; net->nn; ++net) {
-      if (net->bc == daddr) {
+    for (size_t net_num = 0; net_num < num_nets; net_num++) {
+      if (nets[net_num].bc == daddr) {
         db = 1;
-        if (saddr <= net->nn || saddr >= net->bc) {
+        if (saddr <= nets[net_num].nn || saddr >= nets[net_num].bc) {
 #ifndef NDEBUG
           fprintf(stderr, "Ignoring directed broadcast to " IPADDR " from " IPADDR " outside corresponding network\n", IPBYTES(&buf[16]), IPBYTES(&buf[12]));
 #endif
@@ -360,20 +374,20 @@ int main(void) {
     printf("Received %zd bytes from " IPADDR ":%d to " IPADDR ":%d\n", n, IPBYTES(&buf[12]), load16(&udp[0]), IPBYTES(&buf[16]), load16(&udp[2]));
 #endif
     uint32_t paddr = daddr;
-    for (const struct net *net = nets; net->nn; ++net) {
-      if (net->bc == daddr) {
+    for (size_t net_num = 0; net_num < num_nets; net_num++) {
+      if (nets[net_num].bc == daddr) {
         continue;
       }
       uint32_t cksum = (uint16_t)~load16(&buf[10]);
       cksum += (~paddr >> 16) + (~paddr & 0xffff);
-      cksum += (net->bc >> 16) + (net->bc & 0xffff);
+      cksum += (nets[net_num].bc >> 16) + (nets[net_num].bc & 0xffff);
       while (cksum > 0xffff) {
         cksum = (uint16_t)(cksum) + (uint16_t)(cksum >> 16);
       }
       cksum = ~cksum;
       store16(&buf[10], cksum);
-      store32(&buf[16], net->bc);
-      paddr = net->bc;
+      store32(&buf[16], nets[net_num].bc);
+      paddr = nets[net_num].bc;
 #ifndef NDEBUG
       cksum = checksum16(&buf[0], ihl*4);
       if (cksum != 0xffff) {
@@ -384,7 +398,7 @@ int main(void) {
         continue;
       }
 #endif
-      const struct sockaddr_in da = {.sin_family = AF_INET, .sin_port = load16(&udp[2]), .sin_addr = {.s_addr = net->bc}};
+      const struct sockaddr_in da = {.sin_family = AF_INET, .sin_port = load16(&udp[2]), .sin_addr = {.s_addr = nets[net_num].bc}};
       while (1) {
         const ssize_t txn = sendto(sock, buf, n, 0, (const struct sockaddr *)&da, sizeof(da));
         if (txn == -1 && errno == EINTR) continue;
