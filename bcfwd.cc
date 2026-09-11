@@ -2,6 +2,7 @@
 // changing the destination address to the corresponding directed broadcast
 // address.  Requires `CAP_NET_RAW` to open a raw UDP socket.
 
+#include <arpa/inet.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <netinet/in.h>
@@ -78,10 +79,7 @@ uint32_t load32(const span<const std::byte> b) {
          std::to_integer<uint32_t>(b[2]) << 8u |
          std::to_integer<uint32_t>(b[3]) << 0u;
 }
-uint32_t load32(const struct in_addr& a) {
-  return load32(
-      span(reinterpret_cast<const std::byte*>(&a.s_addr), sizeof(a.s_addr)));
-}
+uint32_t load32(const struct in_addr& a) { return ntohl(a.s_addr); }
 void store32(const span<std::byte> b, const uint32_t val) {
   b[0] = std::byte(val >> 24u);
   b[1] = std::byte(val >> 16u);
@@ -131,8 +129,7 @@ class AsIPAddr {
       : bb_{std::to_integer<uint8_t>(b[0]), std::to_integer<uint8_t>(b[1]),
             std::to_integer<uint8_t>(b[2]), std::to_integer<uint8_t>(b[3])} {}
   explicit constexpr AsIPAddr(const struct in_addr& a)
-      : AsIPAddr(span(reinterpret_cast<const std::byte*>(&a.s_addr),
-                      sizeof(a.s_addr))) {}
+      : AsIPAddr(ntohl(a.s_addr)) {}
 
  private:
   std::array<uint8_t, 4> bb_;
@@ -165,8 +162,10 @@ int load_local_nets() {
   }
   const struct sockaddr_nl addr = {
       .nl_family = AF_NETLINK, .nl_pad = {}, .nl_pid = {}, .nl_groups = {}};
-  int ret =
-      bind(sock, reinterpret_cast<const struct sockaddr*>(&addr), sizeof(addr));
+  struct sockaddr gen_addr;
+  static_assert(sizeof(gen_addr) >= sizeof(addr));
+  memcpy(&gen_addr, &addr, sizeof(addr));
+  int ret = bind(sock, &gen_addr, sizeof(addr));
   if (ret == -1) {
     debug_perror("Error binding rtnetlink socket");
     return 2;
@@ -225,6 +224,7 @@ int load_local_nets() {
       rx_bytes = n;
       break;
     }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
     for (const auto* msg = reinterpret_cast<const struct nlmsghdr*>(buf.data());
          NLMSG_OK(msg, rx_bytes); msg = NLMSG_NEXT(msg, rx_bytes)) {
       switch (msg->nlmsg_type) {
@@ -247,7 +247,8 @@ int load_local_nets() {
       if (done) {
         break;
       }
-      const auto* const addrmsg =
+      const auto* const
+          addrmsg =  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
           reinterpret_cast<struct ifaddrmsg*>(NLMSG_DATA(msg));
       if (addrmsg->ifa_family != AF_INET) {
         debug_errorf("Unexpected ifa_family %u", addrmsg->ifa_family);
@@ -266,19 +267,21 @@ int load_local_nets() {
         continue;
       }
       size_t payload_bytes = IFA_PAYLOAD(msg);
-      for (const auto* attr =
-               reinterpret_cast<const struct rtattr*>(IFA_RTA(addrmsg));
-           RTA_OK(attr, payload_bytes); attr = RTA_NEXT(attr, payload_bytes)) {
+      for (
+          const auto*
+              attr =  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+          reinterpret_cast<const struct rtattr*>(IFA_RTA(addrmsg));
+          RTA_OK(attr, payload_bytes); attr = RTA_NEXT(attr, payload_bytes)) {
         switch (attr->rta_type) {
           case IFA_BROADCAST: {
-            const auto* addr =
-                reinterpret_cast<const struct in_addr*>(RTA_DATA(attr));
+            struct in_addr addr;
+            memcpy(&addr, RTA_DATA(attr), sizeof(addr));
             if (addrmsg->ifa_prefixlen == 0u) {
               debug_errorf("Broadcast address %v with prefix len of 0... wtf?",
-                           AsIPAddr(addr->s_addr));
+                           AsIPAddr(addr.s_addr));
               continue;
             }
-            if (!nets.try_emplace_back(load32(*addr), addrmsg->ifa_prefixlen)
+            if (!nets.try_emplace_back(load32(addr), addrmsg->ifa_prefixlen)
                      .has_value()) {
               debug_errorf("Too many local interfaces; limit is %d",
                            nets.size());
@@ -360,8 +363,10 @@ int main() {
                                   .sin_port = 0,
                                   .sin_addr = {.s_addr = INADDR_ANY},
                                   .sin_zero = {}};
-  iret =
-      bind(sock, reinterpret_cast<const struct sockaddr*>(&any), sizeof(any));
+  struct sockaddr gen_addr;
+  static_assert(sizeof(gen_addr) >= sizeof(any));
+  memcpy(&gen_addr, &any, sizeof(any));
+  iret = bind(sock, &gen_addr, sizeof(any));
   if (iret == -1) {
     debug_perror("Error binding socket");
     return 4;
@@ -490,10 +495,12 @@ int main() {
                                      .sin_port = load16(udp.subspan(2, 2)),
                                      .sin_addr = {.s_addr = net.bc()},
                                      .sin_zero = {}};
+      struct sockaddr gen_addr;
+      static_assert(sizeof(gen_addr) >= sizeof(da));
+      memcpy(&gen_addr, &da, sizeof(da));
       while (true) {
         const ssize_t txn =
-            sendto(sock, pkt.data(), pkt.size(), 0,
-                   reinterpret_cast<const struct sockaddr*>(&da), sizeof(da));
+            sendto(sock, pkt.data(), pkt.size(), 0, &gen_addr, sizeof(da));
         if (txn == -1 && errno == EINTR) {
           continue;
         }
