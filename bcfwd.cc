@@ -69,8 +69,8 @@ uint16_t load16(const span<const std::byte> b) {
   return hi | lo;
 }
 void store16(const span<std::byte> b, const uint16_t val) {
-  b[0] = static_cast<std::byte>(val >> 8u);
-  b[1] = static_cast<std::byte>(val);
+  b[0] = std::byte(val >> 8u);
+  b[1] = std::byte(val);
 }
 uint32_t load32(const span<const std::byte> b) {
   return std::to_integer<uint32_t>(b[0]) << 24u |
@@ -83,10 +83,10 @@ uint32_t load32(const struct in_addr& a) {
       span(reinterpret_cast<const std::byte*>(&a.s_addr), sizeof(a.s_addr)));
 }
 void store32(const span<std::byte> b, const uint32_t val) {
-  b[0] = static_cast<std::byte>(val >> 24u);
-  b[1] = static_cast<std::byte>(val >> 16u);
-  b[2] = static_cast<std::byte>(val >> 8u);
-  b[3] = static_cast<std::byte>(val >> 0u);
+  b[0] = std::byte(val >> 24u);
+  b[1] = std::byte(val >> 16u);
+  b[2] = std::byte(val >> 8u);
+  b[3] = std::byte(val >> 0u);
 }
 
 #ifdef NDEBUG
@@ -121,12 +121,15 @@ class AsIPAddr {
   explicit constexpr AsIPAddr(const span<const std::byte>) {}
   explicit constexpr AsIPAddr(const struct in_addr&) {}
 #else
-  explicit constexpr AsIPAddr(const uint32_t val)
-      : bb_{static_cast<uint8_t>(val >> 24u), static_cast<uint8_t>(val >> 16u),
-            static_cast<uint8_t>(val >> 8u), static_cast<uint8_t>(val >> 0u)} {}
+  explicit constexpr AsIPAddr(const uint32_t val) {
+    bb_[0] = val >> 24u;
+    bb_[1] = val >> 16u;
+    bb_[2] = val >> 8u;
+    bb_[3] = val >> 0u;
+  }
   explicit constexpr AsIPAddr(const span<const std::byte> b)
-      : bb_{static_cast<uint8_t>(b[0]), static_cast<uint8_t>(b[1]),
-            static_cast<uint8_t>(b[2]), static_cast<uint8_t>(b[3])} {}
+      : bb_{std::to_integer<uint8_t>(b[0]), std::to_integer<uint8_t>(b[1]),
+            std::to_integer<uint8_t>(b[2]), std::to_integer<uint8_t>(b[3])} {}
   explicit constexpr AsIPAddr(const struct in_addr& a)
       : AsIPAddr(span(reinterpret_cast<const std::byte*>(&a.s_addr),
                       sizeof(a.s_addr))) {}
