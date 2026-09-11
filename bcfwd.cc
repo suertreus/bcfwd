@@ -27,8 +27,7 @@
 #include <span>
 #endif
 
-// TODO: spans
-// TODO: std::byte
+// TODO: deduplicate ipaddr conversions, promote to a value type
 
 namespace {
 
@@ -36,19 +35,24 @@ namespace {
 template <typename T>
 class span {
  public:
-  explicit constexpr span(T *const ptr, const size_t len) : ptr_(ptr), len_(len) {}
+  explicit constexpr span(T* const ptr, const size_t len)
+      : ptr_(ptr), len_(len) {}
   template <size_t N>
-  explicit constexpr span(std::array<T, N> &arr) : span(arr.data(), arr.size()) {}
-  constexpr span<T> subspan(const size_t start, const size_t len = std::numeric_limits<size_t>::max()) const {
-    return span(ptr_ + start, len == std::numeric_limits<size_t>::max() ? len_ - start : len);
+  explicit constexpr span(std::array<T, N>& arr)
+      : span(arr.data(), arr.size()) {}
+  constexpr span<T> subspan(
+      const size_t start,
+      const size_t len = std::numeric_limits<size_t>::max()) const {
+    return span(ptr_ + start,
+                len == std::numeric_limits<size_t>::max() ? len_ - start : len);
   }
-  constexpr T *data() const noexcept { return ptr_; }
+  constexpr T* data() const noexcept { return ptr_; }
   constexpr size_t size() const noexcept { return len_; }
   constexpr T& operator[](const size_t i) const noexcept { return ptr_[i]; }
   operator span<const T>() const { return span<const T>(ptr_, len_); }
 
  private:
-  T *ptr_;
+  T* ptr_;
   size_t len_;
 };
 #else
@@ -56,24 +60,26 @@ template <typename T>
 using span = std::span<T>;
 #endif
 
-uint16_t load16(const span<const uint8_t> b) {
-  return b[0] << 8 | b[1] << 0;
+uint16_t load16(const span<const std::byte> b) {
+  return static_cast<uint16_t>(b[0]) << 8 | static_cast<uint16_t>(b[1]) << 0;
 }
-void store16(const span<uint8_t> b, const uint16_t val) {
-  b[0] = val >> 8;
-  b[1] = val;
+void store16(const span<std::byte> b, const uint16_t val) {
+  b[0] = static_cast<std::byte>(val >> 8);
+  b[1] = static_cast<std::byte>(val);
 }
-uint32_t load32(const span<const uint8_t> b) {
-  return b[0] << 24 | b[1] << 16 | b[2] << 8 | b[3] << 0;
+uint32_t load32(const span<const std::byte> b) {
+  return static_cast<uint32_t>(b[0]) << 24 | static_cast<uint32_t>(b[1]) << 16 |
+         static_cast<uint32_t>(b[2]) << 8 | static_cast<uint32_t>(b[3]) << 0;
 }
 uint32_t load32(const struct in_addr& a) {
-  return load32(span(reinterpret_cast<const uint8_t*>(&a.s_addr), sizeof(a.s_addr)));
+  return load32(
+      span(reinterpret_cast<const std::byte*>(&a.s_addr), sizeof(a.s_addr)));
 }
-void store32(const span<uint8_t> b, const uint32_t val) {
-  b[0] = val >> 24;
-  b[1] = val >> 16;
-  b[2] = val >> 8;
-  b[3] = val >> 0;
+void store32(const span<std::byte> b, const uint32_t val) {
+  b[0] = static_cast<std::byte>(val >> 24);
+  b[1] = static_cast<std::byte>(val >> 16);
+  b[2] = static_cast<std::byte>(val >> 8);
+  b[3] = static_cast<std::byte>(val >> 0);
 }
 
 #ifdef NDEBUG
@@ -104,15 +110,18 @@ void debug_errorf(const absl::FormatSpec<Args...>& format,
 struct AsIPAddr {
 #ifdef NDEBUG
   AsIPAddr(const uint32_t) {}
-  AsIPAddr(const span<const uint8_t>) {}
+  AsIPAddr(const span<const std::byte>) {}
   AsIPAddr(const struct in_addr&) {}
 #else
   AsIPAddr(const uint32_t val)
       : bb{static_cast<uint8_t>(val >> 24), static_cast<uint8_t>(val >> 16),
            static_cast<uint8_t>(val >> 8), static_cast<uint8_t>(val >> 0)} {}
-  AsIPAddr(const span<const uint8_t> b) : bb{b[0], b[1], b[2], b[3]} {}
+  AsIPAddr(const span<const std::byte> b)
+      : bb{static_cast<uint8_t>(b[0]), static_cast<uint8_t>(b[1]),
+           static_cast<uint8_t>(b[2]), static_cast<uint8_t>(b[3])} {}
   AsIPAddr(const struct in_addr& a)
-      : AsIPAddr(span(reinterpret_cast<const uint8_t*>(&a.s_addr), sizeof(a.s_addr))) {}
+      : AsIPAddr(span(reinterpret_cast<const std::byte*>(&a.s_addr),
+                      sizeof(a.s_addr))) {}
   uint8_t bb[4];
   template <typename Sink>
   friend void AbslStringify(Sink& sink, const AsIPAddr ip) {
@@ -123,7 +132,7 @@ struct AsIPAddr {
 };
 
 struct Net {
-  Net(uint32_t addr, uint8_t prefix)
+  Net(uint32_t addr, int prefix)
       : nn(addr & 0xffffffff << (32 - prefix)),
         bc(addr | 0xffffffff >> prefix) {}
   uint32_t nn, bc;
@@ -176,7 +185,7 @@ int load_local_nets() {
     break;
   }
   while (1) {
-    alignas(struct nlmsghdr) std::array<uint8_t, 4096> buf;
+    alignas(struct nlmsghdr) std::array<std::byte, 65536> buf;
     size_t rx_bytes;
     int done = 0;
     while (1) {
@@ -245,8 +254,7 @@ int load_local_nets() {
                            AsIPAddr(addr->s_addr));
               continue;
             }
-            if (!nets.try_emplace_back(load32(*addr),
-                                       addrmsg->ifa_prefixlen)
+            if (!nets.try_emplace_back(load32(*addr), addrmsg->ifa_prefixlen)
                      .has_value()) {
               debug_errorf("Too many local interfaces; limit is %d",
                            nets.size());
@@ -280,7 +288,7 @@ int load_local_nets() {
 }
 
 #ifndef NDEBUG
-static uint16_t checksum16(const span<const uint8_t> buf) {
+static uint16_t checksum16(const span<const std::byte> buf) {
   uint32_t sum = 0;
   for (size_t i = 0; i + 1 < buf.size(); i += 2) {
     sum += load16(buf.subspan(i, 2));
@@ -330,8 +338,8 @@ int main() {
     debug_perror("Error binding socket");
     return 4;
   }
-  std::array<uint8_t, 65535> buf;
-  uint8_t errs = 0;
+  std::array<std::byte, 65535> buf;
+  int errs = 0;
   while (1) {
     ssize_t n = recv(sock, buf.data(), buf.size(), MSG_TRUNC);
     if (n == -1 && errno == EINTR) continue;
@@ -354,11 +362,11 @@ int main() {
       continue;
     }
 #ifndef NDEBUG
-    if (pkt[0] >> 4 != 4) {
+    if ((pkt[0] >> 4) != std::byte{4}) {
       debug_errorf("Not an IPv4 packet");
       continue;
     }
-    if (pkt[9] != IPPROTO_UDP) {
+    if (pkt[9] != std::byte{IPPROTO_UDP}) {
       debug_errorf("Not a UDP packet");
       continue;
     }
@@ -370,7 +378,7 @@ int main() {
       continue;
     }
 #endif
-    const uint8_t ihl = pkt[0] & 0xf;
+    const size_t ihl = static_cast<size_t>(pkt[0]) & 0xf;
 #ifndef NDEBUG
     if (pkt.size() < ihl * 4) {
       debug_errorf(
@@ -378,7 +386,7 @@ int main() {
           pkt.size(), AsIPAddr(pkt.subspan(12, 4)));
       continue;
     }
-    const span<const uint8_t> hdr = pkt.subspan(0, ihl * 4);
+    const span<const std::byte> hdr = pkt.subspan(0, ihl * 4);
     const uint16_t cksum = checksum16(hdr);
     if (cksum != 0xffff) {
       debug_errorf("Bad IPv4 checksum 0x%04x from %v", cksum,
@@ -404,17 +412,19 @@ int main() {
     }
     if (cnt) continue;
     if (!db) {
-      debug_errorf("Not a directed broadcast; to %v", AsIPAddr(pkt.subspan(16, 4)));
+      debug_errorf("Not a directed broadcast; to %v",
+                   AsIPAddr(pkt.subspan(16, 4)));
       continue;
     }
-    const span<const uint8_t> udp = pkt.subspan(ihl * 4);
+    const span<const std::byte> udp = pkt.subspan(ihl * 4);
     if (udp.size() < 8) {
       debug_errorf("Short UDP datagram of size %u from %v", udp.size(),
                    AsIPAddr(pkt.subspan(12, 4)));
       continue;
     }
-    debug_printf("Received %u bytes from %v:%d to %v:%d", pkt.size(), AsIPAddr(pkt.subspan(12, 4)),
-                 load16(udp.subspan(0, 2)), AsIPAddr(pkt.subspan(16, 4)), load16(udp.subspan(2, 2)));
+    debug_printf("Received %u bytes from %v:%d to %v:%d", pkt.size(),
+                 AsIPAddr(pkt.subspan(12, 4)), load16(udp.subspan(0, 2)),
+                 AsIPAddr(pkt.subspan(16, 4)), load16(udp.subspan(2, 2)));
     uint32_t paddr = daddr;
     for (const Net& net : nets) {
       if (net.bc == daddr) {
@@ -461,8 +471,8 @@ int main() {
                        AsIPAddr(pkt.subspan(16, 4)), load16(udp.subspan(2, 2)));
         }
         debug_printf("    Sent %d bytes from %v:%d to %v:%d", txn,
-                     AsIPAddr(pkt.subspan(12, 4)), load16(udp.subspan(0, 2)), AsIPAddr(pkt.subspan(16, 4)),
-                     load16(udp.subspan(2, 2)));
+                     AsIPAddr(pkt.subspan(12, 4)), load16(udp.subspan(0, 2)),
+                     AsIPAddr(pkt.subspan(16, 4)), load16(udp.subspan(2, 2)));
         break;
       }
     }
