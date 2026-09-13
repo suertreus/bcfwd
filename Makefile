@@ -8,7 +8,7 @@ CXX_DEBUG := clang++
 CXX := aarch64-unknown-linux-musl-g++
 CXXFLAGS_COMMON := -std=c++26 -Wall -Wextra -pedantic
 CXXFLAGS_DEBUG := -Wno-deprecated-declarations
-CXXFLAGS := -Os -static -DNDEBUG=1 -Wa,--gsframe=no -fomit-frame-pointer -ffunction-sections -fdata-sections -Wl,--gc-sections -Wl,--strip-all -Wl,--discard-all
+CXXFLAGS := -Os -static -DNDEBUG=1
 
 TIDY_CHECKS := *
 TIDY_CHECKS += -llvmlibc-* -llvm-prefer-static-over-anonymous-namespace
