@@ -29,8 +29,6 @@
 #include <span>
 #endif
 
-// TODO: deduplicate ipaddr conversions, promote to a value type
-
 namespace {
 
 #ifdef NDEBUG
@@ -73,37 +71,30 @@ void store16(const span<std::byte> b, const uint16_t val) {
   b[0] = std::byte(val >> 8u);
   b[1] = std::byte(val);
 }
-uint32_t load32(const span<const std::byte> b) {
-  return std::to_integer<uint32_t>(b[0]) << 24u |
-         std::to_integer<uint32_t>(b[1]) << 16u |
-         std::to_integer<uint32_t>(b[2]) << 8u |
-         std::to_integer<uint32_t>(b[3]) << 0u;
-}
-uint32_t load32(const struct in_addr& a) { return ntohl(a.s_addr); }
-void store32(const span<std::byte> b, const uint32_t val) {
-  b[0] = std::byte(val >> 24u);
-  b[1] = std::byte(val >> 16u);
-  b[2] = std::byte(val >> 8u);
-  b[3] = std::byte(val >> 0u);
-}
 
-#ifdef NDEBUG
-void debug_perror(std::string_view) {}
-template <typename... Args>
-void debug_printf(const Args&...) {}
-template <typename... Args>
-void debug_errorf(const Args&...) {}
-#else
 void debug_perror(std::string_view msg) {
+#ifdef NDEBUG
+  (void)msg;
+#else
   (void)absl::FPrintF(stderr, "%s: %s\n", msg,
                       absl::base_internal::StrError(errno));
+#endif
 }
+#ifdef NDEBUG
+template <typename... Args>
+void debug_printf(const Args&...) {}
+#else
 template <typename... Args>
 void debug_printf(const absl::FormatSpec<Args...>& format,
                   const Args&... args) {
   (void)absl::FPrintF(stdout, format, args...);
   (void)fputc('\n', stdout);
 }
+#endif
+#ifdef NDEBUG
+template <typename... Args>
+void debug_errorf(const Args&...) {}
+#else
 template <typename... Args>
 void debug_errorf(const absl::FormatSpec<Args...>& format,
                   const Args&... args) {
@@ -112,45 +103,51 @@ void debug_errorf(const absl::FormatSpec<Args...>& format,
 }
 #endif
 
-class AsIPAddr {
+class IPAddr {
  public:
-#ifdef NDEBUG
-  explicit constexpr AsIPAddr(const uint32_t) {}
-  explicit constexpr AsIPAddr(const span<const std::byte>) {}
-  explicit constexpr AsIPAddr(const struct in_addr&) {}
-#else
-  explicit constexpr AsIPAddr(const uint32_t val) {
-    bb_[0] = val >> 24u;
-    bb_[1] = val >> 16u;
-    bb_[2] = val >> 8u;
-    bb_[3] = val >> 0u;
+  explicit constexpr IPAddr(const uint32_t val) : addr_(val) {}
+  explicit constexpr IPAddr(const struct in_addr& a)
+      : IPAddr(ntohl(a.s_addr)) {}
+  explicit constexpr IPAddr(const span<const std::byte> b)
+      : addr_{std::to_integer<uint32_t>(b[0]) << 24u |
+              std::to_integer<uint32_t>(b[1]) << 16u |
+              std::to_integer<uint32_t>(b[2]) << 8u |
+              std::to_integer<uint32_t>(b[3]) << 0u} {}
+  bool operator==(const IPAddr that) const { return this->addr_ == that.addr_; }
+  auto operator<=>(const IPAddr that) const {
+    return this->addr_ <=> that.addr_;
   }
-  explicit constexpr AsIPAddr(const span<const std::byte> b)
-      : bb_{std::to_integer<uint8_t>(b[0]), std::to_integer<uint8_t>(b[1]),
-            std::to_integer<uint8_t>(b[2]), std::to_integer<uint8_t>(b[3])} {}
-  explicit constexpr AsIPAddr(const struct in_addr& a)
-      : AsIPAddr(ntohl(a.s_addr)) {}
+
+  [[nodiscard]] constexpr IPAddr net(unsigned int prefix) const {
+    return IPAddr(addr_ >> (32u - prefix) << (32u - prefix));
+  }
+  [[nodiscard]] constexpr IPAddr bc(unsigned int prefix) const {
+    return IPAddr(addr_ | 0xffffffffu >> prefix);
+  }
+  [[nodiscard]] constexpr uint32_t as_uint32() const { return addr_; }
 
  private:
-  std::array<uint8_t, 4> bb_;
+  uint32_t addr_;
+
+#ifndef NDEBUG
   template <typename Sink>
-  friend void AbslStringify(Sink& sink, const AsIPAddr ip) {
-    (void)absl::Format(&sink, "%d.%d.%d.%d", ip.bb_[0], ip.bb_[1], ip.bb_[2],
-                       ip.bb_[3]);
+  friend void AbslStringify(Sink& sink, const IPAddr ip) {
+    (void)absl::Format(&sink, "%d.%d.%d.%d", ip.addr_ >> 24u & 0xffu,
+                       ip.addr_ >> 16u & 0xffu, ip.addr_ >> 8u & 0xffu,
+                       ip.addr_ >> 0u & 0xffu);
   }
 #endif
 };
 
 class Net {
  public:
-  constexpr Net(uint32_t addr, unsigned int prefix)
-      : nn_(addr & 0xffffffffu << (32u - prefix)),
-        bc_(addr | 0xffffffffu >> prefix) {}
-  [[nodiscard]] constexpr uint32_t nn() const { return nn_; }
-  [[nodiscard]] constexpr uint32_t bc() const { return bc_; }
+  constexpr Net(IPAddr addr, unsigned int prefix)
+      : net_(addr.net(prefix)), bc_(addr.bc(prefix)) {}
+  [[nodiscard]] constexpr IPAddr net() const { return net_; }
+  [[nodiscard]] constexpr IPAddr bc() const { return bc_; }
 
  private:
-  uint32_t nn_, bc_;
+  IPAddr net_, bc_;
 };
 std::inplace_vector<Net, 64> nets;
 
@@ -165,8 +162,7 @@ int load_local_nets() {
   struct sockaddr gen_addr;
   static_assert(sizeof(gen_addr) >= sizeof(addr));
   memcpy(&gen_addr, &addr, sizeof(addr));
-  int ret = bind(sock, &gen_addr, sizeof(addr));
-  if (ret == -1) {
+  if (const int ret = bind(sock, &gen_addr, sizeof(addr)); ret == -1) {
     debug_perror("Error binding rtnetlink socket");
     return 2;
   }
@@ -278,10 +274,10 @@ int load_local_nets() {
             memcpy(&addr, RTA_DATA(attr), sizeof(addr));
             if (addrmsg->ifa_prefixlen == 0u) {
               debug_errorf("Broadcast address %v with prefix len of 0... wtf?",
-                           AsIPAddr(addr.s_addr));
+                           IPAddr(addr.s_addr));
               continue;
             }
-            if (!nets.try_emplace_back(load32(addr), addrmsg->ifa_prefixlen)
+            if (!nets.try_emplace_back(IPAddr(addr), addrmsg->ifa_prefixlen)
                      .has_value()) {
               debug_errorf("Too many local interfaces; limit is %d",
                            nets.size());
@@ -310,8 +306,7 @@ int load_local_nets() {
       break;
     }
   }
-  ret = close(sock);
-  if (ret == -1) {
+  if (const int ret = close(sock); ret == -1) {
     debug_perror("Error closing rtnetlink socket");
     return 11;
   }
@@ -331,6 +326,36 @@ uint16_t checksum16(const span<const std::byte> buf) {
 }
 #endif
 
+bool checksum16_swap32(const span<std::byte> hdr, const size_t offset,
+                       const uint32_t new_val) {
+  const uint16_t prev_hi = load16(hdr.subspan(offset, 2));
+  const uint16_t prev_lo = load16(hdr.subspan(offset + 2, 2));
+  const uint16_t new_hi = new_val >> 16u;
+  const uint16_t new_lo = new_val;
+  uint32_t cksum = ~load16(hdr.subspan(10, 2));
+  cksum &= 0xffffu;
+  cksum += ~prev_lo + ~prev_hi + new_lo + new_hi;
+  while (cksum > 0xffffu) {
+    cksum = (cksum & 0xffffu) + (cksum >> 16u);
+  }
+  cksum = ~cksum;
+  store16(hdr.subspan(10, 2), cksum);
+  store16(hdr.subspan(offset, 2), new_hi);
+  store16(hdr.subspan(offset + 2, 2), new_lo);
+#ifndef NDEBUG
+  cksum = checksum16(hdr);
+  if (cksum != 0xffffu) {
+    const IPAddr saddr(hdr.subspan(12, 4));
+    debug_errorf("Bad recomputed IPv4 checksum 0x%04x from %v", cksum, saddr);
+    store16(hdr.subspan(10, 2), 0);
+    cksum = checksum16(hdr);
+    debug_errorf("    checksum should maybe be 0x%04x from %v", cksum, saddr);
+    return false;
+  }
+#endif
+  return true;
+}
+
 }  // namespace
 
 int main() {
@@ -339,23 +364,23 @@ int main() {
     return 0x10 + err;
   }
   for (const Net& net : nets) {
-    debug_printf("Local network %v, broadcast %v", AsIPAddr(net.nn()),
-                 AsIPAddr(net.bc()));
+    debug_printf("Local network %v, broadcast %v", net.net(), net.bc());
   }
   const int sock = socket(PF_INET, SOCK_RAW, IPPROTO_UDP);
   if (sock == -1) {
     debug_perror("Error opening socket");
     return 1;
   }
-  int iret;
   const int one = 1;
-  iret = setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
-  if (iret == -1) {
+  if (const int ret =
+          setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+      ret == -1) {
     debug_perror("Error setting socket option SO_BROADCAST");
     return 2;
   }
-  iret = setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
-  if (iret == -1) {
+  if (const int ret =
+          setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
+      ret == -1) {
     debug_perror("Error setting socket option IP_HDRINCL");
     return 3;
   }
@@ -366,8 +391,7 @@ int main() {
   struct sockaddr gen_addr;
   static_assert(sizeof(gen_addr) >= sizeof(any));
   memcpy(&gen_addr, &any, sizeof(any));
-  iret = bind(sock, &gen_addr, sizeof(any));
-  if (iret == -1) {
+  if (const int ret = bind(sock, &gen_addr, sizeof(any)); ret == -1) {
     debug_perror("Error binding socket");
     return 4;
   }
@@ -405,11 +429,15 @@ int main() {
       debug_errorf("Not a UDP packet");
       continue;
     }
-    const uint16_t totlen = load16(pkt.subspan(2, 2));
-    if (totlen != pkt.size()) {
+#endif
+    const IPAddr saddr(pkt.subspan(12, 4));
+    const IPAddr daddr(pkt.subspan(16, 4));
+#ifndef NDEBUG
+    if (const uint16_t totlen = load16(pkt.subspan(2, 2));
+        totlen != pkt.size()) {
       debug_errorf(
           "Received %u bytes but packet ip length field is %d bytes from %v",
-          pkt.size(), totlen, AsIPAddr(pkt.subspan(12, 4)));
+          pkt.size(), totlen, saddr);
       continue;
     }
 #endif
@@ -418,29 +446,27 @@ int main() {
     if (pkt.size() < ihl * 4) {
       debug_errorf(
           "Header is %u words but total length is only %u bytes from %v", ihl,
-          pkt.size(), AsIPAddr(pkt.subspan(12, 4)));
-      continue;
-    }
-    const span<const std::byte> hdr = pkt.subspan(0, ihl * 4);
-    const uint16_t cksum = checksum16(hdr);
-    if (cksum != 0xffffu) {
-      debug_errorf("Bad IPv4 checksum 0x%04x from %v", cksum,
-                   AsIPAddr(pkt.subspan(12, 4)));
+          pkt.size(), saddr);
       continue;
     }
 #endif
-    const uint32_t saddr = load32(pkt.subspan(12, 4));
-    const uint32_t daddr = load32(pkt.subspan(16, 4));
+    const span<std::byte> hdr = pkt.subspan(0, ihl * 4);
+#ifndef NDEBUG
+    if (const uint16_t cksum = checksum16(hdr); cksum != 0xffffu) {
+      debug_errorf("Bad IPv4 checksum 0x%04x from %v", cksum, saddr);
+      continue;
+    }
+#endif
     bool db = false;
     bool cnt = false;
     for (const Net& net : nets) {
       if (net.bc() == daddr) {
         db = true;
-        if (saddr <= net.nn() || saddr >= net.bc()) {
+        if (saddr <= net.net() || saddr >= net.bc()) {
           debug_errorf(
               "Ignoring directed broadcast to %v from %v outside corresponding "
               "network",
-              AsIPAddr(pkt.subspan(16, 4)), AsIPAddr(pkt.subspan(12, 4)));
+              daddr, saddr);
           cnt = true;
         }
         break;
@@ -450,51 +476,30 @@ int main() {
       continue;
     }
     if (!db) {
-      debug_errorf("Not a directed broadcast; to %v",
-                   AsIPAddr(pkt.subspan(16, 4)));
+      debug_errorf("Not a directed broadcast; to %v", daddr);
       continue;
     }
     const span<const std::byte> udp = pkt.subspan(ihl * 4);
     if (udp.size() < 8) {
-      debug_errorf("Short UDP datagram of size %u from %v", udp.size(),
-                   AsIPAddr(pkt.subspan(12, 4)));
+      debug_errorf("Short UDP datagram of size %u from %v", udp.size(), saddr);
       continue;
     }
-    debug_printf("Received %u bytes from %v:%d to %v:%d", pkt.size(),
-                 AsIPAddr(pkt.subspan(12, 4)), load16(udp.subspan(0, 2)),
-                 AsIPAddr(pkt.subspan(16, 4)), load16(udp.subspan(2, 2)));
-    uint32_t paddr = daddr;
+    const uint16_t sport = load16(udp.subspan(0, 2));
+    const uint16_t dport = load16(udp.subspan(2, 2));
+    debug_printf("Received %u bytes from %v:%d to %v:%d", pkt.size(), saddr,
+                 sport, daddr, dport);
     for (const Net& net : nets) {
       if (net.bc() == daddr) {
         continue;
       }
-      uint32_t cksum = ~load16(pkt.subspan(10, 2));
-      cksum &= 0xffffu;
-      cksum += (~paddr >> 16u) + (~paddr & 0xffffu);
-      cksum += (net.bc() >> 16u) + (net.bc() & 0xffffu);
-      while (cksum > 0xffffu) {
-        cksum = (cksum & 0xffffu) + (cksum >> 16u);
-      }
-      cksum = ~cksum;
-      store16(pkt.subspan(10, 2), cksum);
-      store32(pkt.subspan(16, 4), net.bc());
-      paddr = net.bc();
-#ifndef NDEBUG
-      cksum = checksum16(hdr);
-      if (cksum != 0xffffu) {
-        debug_errorf("Bad recomputed IPv4 checksum 0x%04x from %v", cksum,
-                     AsIPAddr(pkt.subspan(12, 4)));
-        store16(pkt.subspan(10, 2), 0);
-        cksum = checksum16(hdr);
-        debug_errorf("    checksum should maybe be 0x%04x from %v", cksum,
-                     AsIPAddr(pkt.subspan(12, 4)));
+      if (!checksum16_swap32(hdr, 16u, net.bc().as_uint32())) {
         continue;
       }
-#endif
-      const struct sockaddr_in da = {.sin_family = AF_INET,
-                                     .sin_port = load16(udp.subspan(2, 2)),
-                                     .sin_addr = {.s_addr = net.bc()},
-                                     .sin_zero = {}};
+      const struct sockaddr_in da = {
+          .sin_family = AF_INET,
+          .sin_port = dport,
+          .sin_addr = {.s_addr = net.bc().as_uint32()},
+          .sin_zero = {}};
       struct sockaddr gen_addr;
       static_assert(sizeof(gen_addr) >= sizeof(da));
       memcpy(&gen_addr, &da, sizeof(da));
@@ -510,11 +515,10 @@ int main() {
         }
         if (std::cmp_less(txn, pkt.size())) {
           debug_errorf("Short write %d < %u to %v:%d", txn, pkt.size(),
-                       AsIPAddr(pkt.subspan(16, 4)), load16(udp.subspan(2, 2)));
+                       net.bc(), dport);
         }
-        debug_printf("    Sent %d bytes from %v:%d to %v:%d", txn,
-                     AsIPAddr(pkt.subspan(12, 4)), load16(udp.subspan(0, 2)),
-                     AsIPAddr(pkt.subspan(16, 4)), load16(udp.subspan(2, 2)));
+        debug_printf("    Sent %d bytes from %v:%d to %v:%d", txn, saddr, sport,
+                     net.bc(), dport);
         break;
       }
     }

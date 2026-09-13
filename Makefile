@@ -22,7 +22,8 @@ TIDY_CHECKS += -fuchsia-statically-constructed-objects -cppcoreguidelines-avoid-
 TIDY_CHECKS += -readability-function-cognitive-complexity
 TIDY_CHECKS += -llvm-header-guard -misc-include-cleaner
 TIDY_CHECKS += -cppcoreguidelines-pro-type-member-init -hicpp-member-init -cppcoreguidelines-init-variables
-TIDY_CHECKS += -fuchsia-default-arguments-calls
+TIDY_CHECKS += -fuchsia-default-arguments-calls -fuchsia-overloaded-operator
+TIDY_CHECKS += -bugprone-easily-swappable-parameters
 
 bcfwd-debug: bcfwd.cc
 	$(CXX_DEBUG) -o $@ $^ $(CXXFLAGS_COMMON) $(CXXFLAGS_DEBUG) $(shell pkg-config --cflags --libs absl_str_format absl_strerror)
